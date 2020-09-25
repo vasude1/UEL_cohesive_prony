@@ -1,16 +1,29 @@
 /* Matrices CLASS TO DEFINE UELMAT ELMENT LHS AND RHS
 Created by Va Ka
 --------------------------------------------------------------------------------
-Last edit:
-Changed RHS - removed if conditionsl
-changed LHS - removed if conditional
-changed the stiffness in LHS - added conditions for damage
-Using inconsistent stiffness matrix for the velocity dependent terms
-Using delta_0= 1E-6, delta_f = 3E-3, eta = 7E6
+Memory Management -
+
+SVARS structure -----
+d1(1),f11,f12,f13...f18(8),h11x,h11y,h12x,h12y,h13x,h13y(2*nel),....
+d2(1),f21,f22,f23...f28(8),h21x,h21y,h22x,h22y,h31x,h31y(2*nel),....
+
+SVARS 0 and 1 are the damage variables at Gauss points
+
+24 terms at a gp in all
+
+SVARS 2 to 9 contain the separation at previous time step at gp 1
+SVARS 10 to 17 contain the force vector at gp 1 at time n-1
+SVARS 18 to 19 contain the h-variable at gp 1
+20 to 25 are backup
+
+SVARS 26 to 33 contain the separation at previous time step at gp 2
+SVARS 34 to 41 contain the force vector at gp 2 at time n-1
+SVARS 42 to 43 contain the h-variable at gp 2
 ------------------------------------------------------------------------------*/
 
 // INCLUDES
 #include <iostream>
+#include<fstream>
 #include <cmath>
 #include <Eigen/Dense> // Eigen class
 
@@ -33,6 +46,13 @@ using namespace std;
 // Constructors ****************************************************************
 Matrices::Matrices(int ndofel){
 
+  number_force = 8;
+  number_elements = 6;
+  number_h = 12;
+  var_per_gp = 1+number_force+number_h;
+  cohesive_prony = MatrixXd::Zero(number_elements,2);
+  dt_gdt = 0.0;
+
   LHS.resize(ndofel,ndofel); // Gausspoint Stiffness contribution
 
   Disp_stiff.resize(ndofel,ndofel);
@@ -43,32 +63,16 @@ Matrices::Matrices(int ndofel){
 
   nnodes = ndofel/2;
 
-  cohesive_prony << 0.096092126464814,	1E-14,
-  0.131669775836881,	1E-13,
-  0.229532673957081,	1E-12,
-  0.231886167949743,	1E-11,
-  0.183771286292404,	1E-10,
-  0.072560462039951,	1E-09,
-  0.025498195885329,	1E-08,
-  0.009082879762867,	1E-07,
-  0.005070356052601,	1E-06,
-  0.003003882953384,	1E-05,
-  0.002091305180757,	0.0001,
-  0.00355114288563,0.001;
 
-  // cohesive_prony << 0.0,	1E-14,
-  // 0.0,	1E-13,
-  // 0.0,	1E-12,
-  // 0.0,	1E-11,
-  // 0.0,	1E-10,
-  // 0.0,	1E-09,
-  // 0.0,	1E-08,
-  // 0.0,	1E-07,
-  // 0.0,	1E-06,
-  // 0.0,	1E-05,
-  // 0.0,	0.0001,
-  // 0.0,0.001;
+  cohesive_prony <<  0.9717,1E-7,
+  0.01,  1e-06,
+  0.00500388,  1e-05,
+  0.00149131, 0.0001,
+  0.00115114,  0.001,
+  0.00121,   0.01;
+  cohesive_prony(seq(0,5),0) *= 1.0/(1.0-cohesive_prony(0,0)-cohesive_prony(1,0)-cohesive_prony(2,0)-cohesive_prony(3,0)-cohesive_prony(4,0)-cohesive_prony(5,0));
 
+  // std::cout << cohesive_prony << '\n';
 };
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
@@ -77,26 +81,27 @@ void Matrices::Set_Matrices(const int lflag,const ShapeFunc& Shape,const MatrixX
                           float time, const int* sequence, int gp, double* hht)
 {
   MatrixXd shape_funcs = Shape.Get_Shape();
-  MatrixXd tangent_deformed = Shape.Get_tangent();
-  MatrixXd normal_deformed = Shape.Get_normal();
 
   cohesive_stiff = 1E13;
 
   evaluate_BMatrix(B_matrix, shape_funcs, sequence);
 
+  Eval_velocity_jump(B_matrix,V);
+
   define_damage_var(time,Coords);
 
   set_Zero();
 
-  Eval_separation(shape_funcs,U,normal_deformed,sequence);
+  Eval_separation(shape_funcs,U,sequence);
 
   Eval_damage(lflag,separation,SVARS,gp);
 
-  Eval_stiff(shape_funcs,tangent_deformed,normal_deformed, separation, sequence, U,V, delta_t);
+  Eval_Rhs(Mass,U,DU,V,A,time,delta_t, shape_funcs, sequence, hht,SVARS,gp,lflag);
+
+  Eval_stiff(separation, sequence, U, delta_t);
 
   Eval_LHS(time,hht);
 
-  Eval_Rhs(Mass,U,DU,V,A,time,delta_t, shape_funcs, sequence, hht,SVARS,gp,lflag);
 
   // throw;
 };
@@ -115,13 +120,18 @@ void Matrices::define_damage_var(float time,const MatrixXd& Coords ){
   x_centroid /= 4.0;
   damage_init = 1E-6; // 1E-6
   damage_fini = 2E-3; //2E-3
+    // if(x_centroid < 3E-3)  // Seed crack
+    // {
+    //   damage_init = 1E-10;
+    //   damage_fini = 2E-3;
+    // }
   if (time>1.0)   // time>1.0
   {
 
-    if(x_centroid < 1.5E-3)  // Seed crack
+    if(x_centroid < 3E-3)  // Seed crack
     {
       damage_init = 1E-7;
-      damage_fini = 3E-3;
+      damage_fini = 2E-3;
     }
   }
 
@@ -132,24 +142,34 @@ void Matrices::Eval_velocity_jump(const MatrixXd& B_matrix, const MatrixXd& V){
   VectorXd jump = B_matrix.transpose()*V_col;
   double jump_x = real(jump(0));
   double jump_y = real(jump(1));
-  velocity_jump = pow(pow(jump_x,2)+pow(jump_y,2),0.5);
+  // velocity_jump = pow(pow(jump_x,2)+pow(jump_y,2),0.5);
+  velocity_jump = jump_y;
 
 };
 
-void Matrices::Eval_separation(const VectorXd& shape_funcs,const MatrixXd& U,const Vector2d& normal_deformed, const int* sequence){
+void Matrices::Eval_separation(const VectorXd& shape_funcs,const MatrixXd& U, const int* sequence){
 
-   MatrixXd left_separation;  // Separation on the Left
-  left_separation = U(*(sequence+3),seq(0,1)) - U(*(sequence+0),seq(0,1));
+  //  MatrixXd left_separation;  // Separation on the Left
+  // left_separation = U(*(sequence+3),seq(0,1)) - U(*(sequence+0),seq(0,1));
+  //
+  //  MatrixXd right_separation; //Separation on the right end
+  // right_separation = U(*(sequence+2),seq(0,1)) - U(*(sequence+1),seq(0,1));
+  //
+  //  MatrixXd gp_separation;  // Separation at Gauss point = N1*u1+N2*u2
+  // gp_separation = shape_funcs(0)*left_separation+shape_funcs(1)*right_separation;
+  //
+  // float separation_x = real(gp_separation(0,0));
+  // float separation_y = real(gp_separation(0,1));
+  // separation = pow(pow(separation_x,2)+pow(separation_y,2),0.5);
 
-   MatrixXd right_separation; //Separation on the right end
-  right_separation = U(*(sequence+2),seq(0,1)) - U(*(sequence+1),seq(0,1));
-
-   MatrixXd gp_separation;  // Separation at Gauss point = N1*u1+N2*u2
-  gp_separation = shape_funcs(0)*left_separation+shape_funcs(1)*right_separation;
-
-  float separation_x = real(gp_separation(0,0));
-  float separation_y = real(gp_separation(0,1));
-  separation = pow(pow(separation_x,2)+pow(separation_y,2),0.5);
+  VectorXd separation_vec = B_matrix.transpose()*U.reshaped<RowMajor>();
+  // std::cout << U << '\n';
+  // std::cout << "  " << '\n';
+  separation = separation_vec.norm();
+  if(separation_vec(1)<0)
+  {
+    separation = 0.0;
+  }
 
 };
 
@@ -157,13 +177,15 @@ void Matrices::Eval_separation(const VectorXd& shape_funcs,const MatrixXd& U,con
 void Matrices::Eval_damage(const int lflag, float separation,double* SVARS, int gp){
 
   // If fully damaged, return
+  // std::cout << separation << '\n';
   damage=0.0;
   if(separation > damage_init)
   {
+    // std::cout << separation << '\n';
     damage = damage_fini*(separation-damage_init)/(separation)/(damage_fini-damage_init);
   }
 
-  if(damage > *(SVARS+gp))
+  if(damage > *(SVARS+gp*var_per_gp))
   {
     if(damage>=1)
     {
@@ -171,17 +193,14 @@ void Matrices::Eval_damage(const int lflag, float separation,double* SVARS, int 
     }
     if(lflag==1)
     {
-        *(SVARS+gp)=damage;
+        *(SVARS+gp*var_per_gp)=damage;
     }
     return;
   }
 
-  if(damage < *(SVARS+gp))
+  if(damage < *(SVARS+gp*var_per_gp))
   {
-    if(lflag==1)
-    {
-        damage=*(SVARS+gp);
-    }
+    damage=*(SVARS+gp*var_per_gp);
     return;
   }
   return;
@@ -189,127 +208,134 @@ void Matrices::Eval_damage(const int lflag, float separation,double* SVARS, int 
 };
 
 
-void Matrices::Eval_stiff(const VectorXd& shape_funcs,const Vector2d& tangent_deformed,const Vector2d& normal_deformed,
-                  float separation,const int* sequence, const MatrixXd& U, const MatrixXd& V, float delta_t){
+void Matrices::Eval_stiff(float separation,const int* sequence, const MatrixXd& U, float delta_t){
 
-    // Elemental matrices
-    MatrixXd stiff(2,2);
-    stiff.setZero();
-
+    // Elemental matrices  (1+dt_gdt)*
+    // std::cout << separation << '\n';
+    MatrixXd stiff = cohesive_stiff*MatrixXd::Identity(2,2);
+    // dt_gdt = 0.0;
     // To determine if the faces are opening or closing
-    VectorXd V_col= V.reshaped<RowMajor>();
-    double multiplication_factor=1;
-
-    for(int i=0;i<number_elements;++i)
+    // VectorXd V_col= V.reshaped<RowMajor>();
+    // w = B_matrix.transpose()*U.reshaped<RowMajor>();
+    Disp_stiff = (1-damage)*(1+dt_gdt)*B_matrix*(stiff*B_matrix.transpose());
+    if((velocity_jump>0) && (separation>damage_init))
     {
-      multiplication_factor += cohesive_prony(i,0)*exp(-delta_t/2.0/cohesive_prony(i,1))/(1.0-(cohesive_prony.colwise().sum())(0));
-      // std::cout << "Begin Print" << '\n';
-      // std::cout << delta_t << '\n';
-      // std::cout << cohesive_prony(i,1) << '\n';
-      // std::cout << cohesive_prony(i,0)*exp(-delta_t/2.0/cohesive_prony(i,1)) << '\n';
+      // std::cout << "Separation Exceeded" << '\n';
+      Disp_stiff -= damage_init*damage_fini/(damage_fini-damage_init)/pow(separation,3)*B_matrix*stiff*(w*(B_matrix.transpose()*U.reshaped<RowMajor>()).transpose())*B_matrix.transpose();
     }
-    // std::cout << multiplication_factor << '\n';
-    // throw;
-    // std::cout << exp(-delta_t/2.0*1000.0) << '\n';
-    stiff(0,0) = cohesive_stiff*multiplication_factor;
-    stiff(1,1) = cohesive_stiff*multiplication_factor;
-
-    stiff(0,0) *= (1-damage);
-    stiff(1,1) *= (1-damage);
-
-    // if(damage>0)
-    // {
-    //   if((B_matrix.transpose()*V_col)[1]<0.0) // Closing faces
-    //   {
-    //     stiff(0,0) *= (1-damage);
-    //     stiff(1,1) *= (1-damage);
-    //   }
-    //   if((B_matrix.transpose()*V_col)[1]>0.0) // Opening faces
-    //   {
-    //     stiff(0,0) *=  (1-damage);
-    //     stiff(1,1) *= -1.0*damage_init/(damage_fini-damage_init);
-    //
-    //     if(abs(damage-1)<1E-8){
-	  //        stiff(1,1)=0.0;
-	  //       }
-    //     // stiff(1,1) *= -1.0*damage_init/(damage_fini-damage_init);
-    //   }
-    // }
-
-    MatrixXd Projection(2,2);  //Projects the separation onto the Axis
-    Projection.setIdentity(); // Include at a later time
-
-    Disp_stiff = B_matrix*(stiff*(Projection*B_matrix.transpose()));
+    // std::cout << 1+dt_gdt << '\n';
+    if (damage>0) {
+      std::ofstream ofile;
+      ofile.open("/home/vasudevan/PhD/Code/UEL_cohesive/implicit/cohesive_prony/Res.txt", std::ios::app);
+      ofile << "gdt = "<< '\n';
+      ofile <<1+dt_gdt<< '\n';
+      ofile << "Damage= "<<'\n';
+      ofile << damage <<'\n';
+      ofile << "Stiff= "<< '\n';
+      ofile << Disp_stiff << '\n';
+      ofile << " " <<'\n';
+      ofile.close();
+    }
 };
 
 
 void Matrices::Eval_LHS(float time, double* hht){
 
-    LHS = Disp_stiff;
+    LHS = (1+*hht)*Disp_stiff;
+    // std::cout << LHS << '\n';
 
 };
 
 void Matrices::Eval_Rhs(const MatrixXd& Mass,const MatrixXd& U,const MatrixXd& DU,const MatrixXd& V,const MatrixXd& A,float time, float delta_t,
 const VectorXd& shape_funcs, const int* sequence, double* hht, double* SVARS, int gp, const int lflag){
-
+  // if (time>1.0 && separation > 1e-6)
+  // {
+  //   std::cout << separation << '\n';
+  // }
   MatrixXd U_col= U.reshaped<RowMajor>();
   MatrixXd DU_col= DU.reshaped<RowMajor>();
-  MatrixXd V_col= V.reshaped<RowMajor>();
-  MatrixXd A_col= A.reshaped<RowMajor>();
-  VectorXd temp_SVARS = VectorXd::Zero(2*number_elements);
-
-  // Update the state variables at GP
-  // History variables - using semi group property of Exponential function
-  //
-
-  for(int i=0;i<2*number_elements;++i)
-  {
-    temp_SVARS(i) = *(2+SVARS+i+2*gp*number_elements);
-
-  }
-
-  for(int i=0;i<number_elements;++i)
-  {
-    temp_SVARS(seq(i*2,(i*2)+1))*= exp(-delta_t/cohesive_prony(i,1));
-    temp_SVARS(seq(i*2,(i*2)+1))+= exp(-delta_t/2.0/cohesive_prony(i,1))*B_matrix.transpose()*DU_col;
-  }
-
-  // SVARS[(2+(i+gp*number_elements)*2)..(2+(i+gp*number_elements)*2)+1]
-  // Update the state variables only when required
-  if(lflag==1)
-  {
-    for(int i=0;i<2*number_elements;++i)
-    {
-      *(2+SVARS+i+2*gp*number_elements) = temp_SVARS(i) ;
-    }
-  }
-
+  // MatrixXd V_col= V.reshaped<RowMajor>();
+  // MatrixXd A_col= A.reshaped<RowMajor>();
   double alpha = *hht;
   double beta = *(hht+1);
   double gamma = *(hht+2);
 
+  // To store the current force vector
+  VectorXd f_n(number_force);
 
-  // Disp vector part
-  MatrixXd stiff(2,2);
-  stiff.setZero();
+  // Compute Separations from displacements
+  Vector2d dDelta_n = B_matrix.transpose()*DU_col;
+  Vector2d Delta_n = B_matrix.transpose()*U_col;
+  Vector2d Delta_nm1 = Delta_n - dDelta_n;
 
-  stiff(0,0) = cohesive_stiff;
-  stiff(1,1) = cohesive_stiff;
-
-  if(damage>0)
+  VectorXd f_nm1(number_force);
+  for(int i =0;i<number_force;++i)
   {
-    stiff(0,0) *= (1-damage);
-    stiff(1,1) *= (1-damage);
+    f_nm1(i) = *(SVARS+gp*var_per_gp+i+1);
   }
 
-  MatrixXd Projection(2,2);  //Projects the separation onto the nodal coordinate
-  Projection.setIdentity();
-  Rhs += -1.0*B_matrix*(stiff*(Projection*B_matrix.transpose()))*U_col - alpha*B_matrix*(stiff*(Projection*B_matrix.transpose()))*DU_col;
-  cohesive_stiff /= (1.0-(cohesive_prony.colwise().sum())(0));
+  // Store Internal variables and old force
+  VectorXd hn(number_h);
+  for(int i=0;i<number_h;++i)
+  {
+    hn(i) = *(SVARS+gp*var_per_gp+number_force+i+1);
+  }
+
+  // Compute factors for force computation
   for(int i=0;i<number_elements;++i)
   {
-    Rhs += -1.0*(1-damage)*cohesive_prony(i,0)*cohesive_stiff*(B_matrix*temp_SVARS(seq(2*i,2*i+1)));
-    // Rhs += -1.0*alpha*(1-damage)*cohesive_prony(i,0)*cohesive_stiff*(B_matrix*temp_SVARS(seq(2*i,2*i+1))        );
+    dt_gdt +=cohesive_prony(i,0)*exp(-delta_t/2.0/cohesive_prony(i,1));
+  }
+
+  // Compute the current force vector
+  MatrixXd stiff = cohesive_stiff*MatrixXd::Identity(2,2);
+  if(damage>0)
+  {
+    stiff = (1-damage)*stiff;
+  }
+
+  w = Delta_n + dt_gdt*dDelta_n;
+  for(int i=0;i<number_elements;++i)
+  {
+    w += exp(-delta_t/cohesive_prony(i,1))*hn(seq(2*i,2*i+1));
+    // std::cout << exp(-delta_t/cohesive_prony(i,1))*hn(seq(2*i,2*i+1)) << '\n';
+  }
+  f_n = B_matrix*stiff*w;
+  // HHT = (1+alpha)*current force - alpha * old force
+  Rhs = -1.0*(1+alpha)*f_n + alpha*f_nm1;
+
+  if (damage>0) {
+    std::ofstream ofile;
+    ofile.open("/home/vasudevan/PhD/Code/UEL_cohesive/implicit/cohesive_prony/Res.txt", std::ios::app);
+    ofile << "Delta_n= "<< '\n';
+    ofile << Delta_n << '\n';
+    ofile << "dDelta_n= "<< '\n';
+    ofile << dDelta_n << '\n';
+    ofile << "Rhs= "<< '\n';
+    ofile << Rhs << '\n';
+    ofile.close();
+  }
+
+  // lflag=1 update the internal variables
+  if(lflag==1)
+  {
+    VectorXd temp_SVARS(2);
+
+    for(int i=0;i<number_elements;++i)
+    {
+      temp_SVARS = cohesive_prony(i,0)*exp(-delta_t/2.0/cohesive_prony(i,1))*dDelta_n;
+    *(SVARS+gp*var_per_gp+1+number_force+2*i) = (*(SVARS+gp*var_per_gp+number_force+2*i))*exp(-delta_t/cohesive_prony(i,1))+temp_SVARS(0) ;
+    *(SVARS+gp*var_per_gp+1+number_force+2*i+1) = (*(SVARS+gp*var_per_gp+number_force+2*i+1))*exp(-delta_t/cohesive_prony(i,1))+temp_SVARS(1) ;
+    }
+    for(int i =0;i<number_force;++i)
+    {
+      *(SVARS+gp*var_per_gp+1+i) = f_n(i) ;
+    }
+  }
+
+  if(lflag==5)
+  {
+    Rhs = 0.5*(f_n+f_nm1);
   }
 
 };

@@ -32,9 +32,15 @@ class Matrices
   double damage_fini;
   double separation;
   double cohesive_stiff;
-  int number_elements = 12;
-  MatrixXd cohesive_prony = MatrixXd::Zero(12,2);
+  int number_force;
+  int number_elements;
+  int number_h;
+  int var_per_gp;
+  MatrixXd cohesive_prony;
   double velocity_jump;
+  Vector2d w;
+  double dt_gdt;
+
 
 //----------------------------------------------------------------------------
 
@@ -47,13 +53,13 @@ class Matrices
 
   void set_Zero();
 
-  void Eval_separation(const VectorXd& ,const MatrixXd& ,const Vector2d&, const int*);
+  void Eval_separation(const VectorXd& ,const MatrixXd& , const int*);
 
   void Eval_damage(const int,float ,double* , int);
 
   void Eval_velocity_jump(const MatrixXd&, const MatrixXd&);
 
-  void Eval_stiff(const VectorXd&,const Vector2d& ,const Vector2d& ,float , const int*, const MatrixXd& U,const MatrixXd&, float);
+  void Eval_stiff(float,const int*,const MatrixXd&,float);
 
   void Eval_LHS(float, double*);
 

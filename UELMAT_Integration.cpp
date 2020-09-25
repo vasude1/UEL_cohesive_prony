@@ -34,8 +34,8 @@ Integration::Integration(){
 //--------------------------------------------------------------------
 
 Integration::set_Gausspoints(){
-  // float usqt = 1./sqrt(3.);
-  float usqt = 1.0;
+  float usqt = 1./sqrt(3.);
+  // float usqt = 1.0;
   points << -usqt, usqt;
 };
 //--------------------------------------------------------------------
